@@ -32,10 +32,10 @@ import java.awt.geom.PathIterator;
 import java.awt.geom.Point2D;
 import java.awt.geom.Rectangle2D;
 import java.awt.image.BufferedImage;
-import java.awt.image.Raster;
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
+
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.pdfbox.contentstream.PDFGraphicsStreamEngine;
@@ -49,7 +49,6 @@ import org.apache.pdfbox.pdmodel.font.PDType0Font;
 import org.apache.pdfbox.pdmodel.font.PDType1CFont;
 import org.apache.pdfbox.pdmodel.font.PDType1Font;
 import org.apache.pdfbox.pdmodel.graphics.PDLineDashPattern;
-import org.apache.pdfbox.pdmodel.graphics.blend.SoftMaskPaint;
 import org.apache.pdfbox.pdmodel.graphics.color.PDColor;
 import org.apache.pdfbox.pdmodel.graphics.color.PDColorSpace;
 import org.apache.pdfbox.pdmodel.graphics.color.PDPattern;
@@ -86,6 +85,7 @@ public class PageDrawer extends PDFGraphicsStreamEngine
     // the graphics device to draw to, xform is the initial transform of the device (i.e. DPI)
     private Graphics2D graphics;
     private AffineTransform xform;
+    private AffineTransform xformFlipped;
 
     // the page box to draw (usually the crop box but may be another)
     private PDRectangle pageSize;
@@ -169,6 +169,7 @@ public class PageDrawer extends PDFGraphicsStreamEngine
 
         graphics.translate(0, pageSize.getHeight());
         graphics.scale(1, -1);
+        xformFlipped = graphics.getTransform();
 
         // TODO use getStroke() to set the initial stroke
         graphics.setStroke(new BasicStroke(1.0f, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER));
@@ -462,47 +463,36 @@ public class PageDrawer extends PDFGraphicsStreamEngine
         linePath.closePath();
     }
 
-    /**
-     * Generates AWT raster for a soft mask
-     * 
-     * @param softMask soft mask
-     * @return AWT raster for soft mask
-     * @throws IOException
-     */
-    private Raster createSoftMaskRaster(PDSoftMask softMask) throws IOException
-    {
-        TransparencyGroup transparencyGroup = new TransparencyGroup(softMask.getGroup(), true);
-        COSName subtype = softMask.getSubType();
-        if (COSName.ALPHA.equals(subtype))
-        {
-            return transparencyGroup.getAlphaRaster();
-        }
-        else if (COSName.LUMINOSITY.equals(subtype))
-        {
-            return transparencyGroup.getLuminosityRaster();
-        }
-        else
-        {
-            throw new IOException("Invalid soft mask subtype.");
-        }
-    }
-
+    // todo: move soft mask apply to getPaint()?
     private Paint applySoftMaskToPaint(Paint parentPaint, PDSoftMask softMask) throws IOException
     {
-        if (softMask != null) 
-        {
-            //TODO PDFBOX-2934
-            if (COSName.ALPHA.equals(softMask.getSubType()))
-            {
-                LOG.info("alpha smask not implemented yet, is ignored");
-                return parentPaint;
-            }
-            return new SoftMaskPaint(parentPaint, createSoftMaskRaster(softMask));
-        }
-        else 
+        if (softMask == null)
         {
             return parentPaint;
         }
+        TransparencyGroup transparencyGroup = new TransparencyGroup(softMask.getGroup(), true);
+        BufferedImage image;
+    
+        COSName subtype = softMask.getSubType();
+        if (COSName.ALPHA.equals(subtype))
+        {
+            //image = transparencyGroup.getImage().getAlphaRaster();
+            throw new UnsupportedOperationException("Not implemented: Alpha SMask"); // todo (need example PDF)
+        }
+        else if (COSName.LUMINOSITY.equals(subtype))
+        {
+            image = transparencyGroup.getImage();
+            BufferedImage gray = new BufferedImage(image.getWidth(), image.getHeight(),
+                                                   BufferedImage.TYPE_BYTE_GRAY);
+            Graphics g = gray.getGraphics();
+            g.drawImage(image, 0, 0, null);
+            g.dispose();
+        }
+        else
+        {
+            throw new IOException("Invalid soft mask subtype"); // todo: shouldn't this be elsewhere?
+        }
+        return new SoftMask(parentPaint, image, transparencyGroup.getBounds());
     }
 
     // returns the stroking AWT Paint
@@ -516,6 +506,7 @@ public class PageDrawer extends PDFGraphicsStreamEngine
     // returns the non-stroking AWT Paint
     private Paint getNonStrokingPaint() throws IOException
     {
+        // todo: why no soft mask?
         return getPaint(getGraphicsState().getNonStrokingColor());
     }
 
@@ -760,7 +751,7 @@ public class PageDrawer extends PDFGraphicsStreamEngine
         if (pdImage.isStencil())
         {
             // fill the image with paint
-            BufferedImage image = pdImage.getStencilImage(getNonStrokingPaint());
+            BufferedImage image = pdImage.getStencilImage(getNonStrokingPaint());  // todo: why no soft mask?
 
             // draw the image
             drawBufferedImage(image, at);
@@ -851,14 +842,9 @@ public class PageDrawer extends PDFGraphicsStreamEngine
         graphics.setComposite(getGraphicsState().getNonStrokingJavaComposite());
         setClip();
 
-        // both the DPI xform and the CTM were already applied to the group, so all we do
-        // here is draw it directly onto the Graphics2D device at the appropriate position
-        PDRectangle bbox = group.getBBox();
-        AffineTransform prev = graphics.getTransform();
-        float x = bbox.getLowerLeftX();
-        float y = pageSize.getHeight() - bbox.getLowerLeftY() - bbox.getHeight();
-        graphics.setTransform(AffineTransform.getTranslateInstance(x * xform.getScaleX(),
-                                                                   y * xform.getScaleY()));
+        // blit directly onto the graphics device using the identity transform
+        Rectangle2D bounds = group.getBounds();
+        graphics.setTransform(new AffineTransform());
 
         PDSoftMask softMask = getGraphicsState().getSoftMask();
         if (softMask != null)
@@ -866,89 +852,91 @@ public class PageDrawer extends PDFGraphicsStreamEngine
             BufferedImage image = group.getImage();
             Paint awtPaint = new TexturePaint(image,
                     new Rectangle2D.Float(0, 0, image.getWidth(), image.getHeight()));
-            awtPaint = applySoftMaskToPaint(awtPaint, softMask); // todo: PDFBOX-994 problem here?
+            awtPaint = applySoftMaskToPaint(awtPaint, softMask);
             graphics.setPaint(awtPaint);
-            graphics.fill(new Rectangle2D.Float(0, 0, bbox.getWidth() * (float)xform.getScaleX(),
-                                                bbox.getHeight() * (float)xform.getScaleY()));
+            graphics.fill(bounds);
         }
         else
         {
-            graphics.drawImage(group.getImage(), null, null);
+            AffineTransform at = AffineTransform.getTranslateInstance(bounds.getX(), bounds.getY());
+            graphics.drawImage(group.getImage(), at, null);
         }
 
-        graphics.setTransform(prev);
+        // restore the device transform
+        graphics.setTransform(xformFlipped);
     }
 
     /**
      * Transparency group.
      **/
-    private final class TransparencyGroup
+    final class TransparencyGroup
     {
         private final BufferedImage image;
-        private final PDRectangle bbox;
-
-        private final int minX;
-        private final int minY;
-        private final int width;
-        private final int height;
+        private final Rectangle2D deviceBounds;
 
         /**
-         * Creates a buffered image for a transparency group result.
+         * Creates a buffered image for a transparency group result. This is rendered to a buffer
+         * which uses the underlying Graphics2D device space, requiring no further transformation.
          */
-        private TransparencyGroup(PDFormXObject form, boolean isSoftMask) throws IOException
+        private TransparencyGroup(PDFormXObject group, boolean isSoftMask) throws IOException
         {
             Graphics2D g2dOriginal = graphics;
             Area lastClipOriginal = lastClip;
 
             // get the CTM x Form Matrix transform
-            Matrix ctm = getGraphicsState().getCurrentTransformationMatrix();
-            Matrix transform = Matrix.concatenate(ctm, form.getMatrix());
+            //Matrix ctm = getGraphicsState().getCurrentTransformationMatrix();
+            //Matrix transform = Matrix.concatenate(ctm, group.getMatrix());
 
             // transform the bbox
-            GeneralPath transformedBox = form.getBBox().transform(transform);
+            //GeneralPath transformedBox = group.getBBox().transform(transform);
 
             // clip the bbox to prevent giant bboxes from consuming all memory
-            Area clip = (Area)getGraphicsState().getCurrentClippingPath().clone();
-            clip.intersect(new Area(transformedBox));
-            Rectangle2D clipRect = clip.getBounds2D();
-            this.bbox = new PDRectangle((float)clipRect.getX(), (float)clipRect.getY(),
-                                        (float)clipRect.getWidth(), (float)clipRect.getHeight());
+            //Area clip = (Area)getGraphicsState().getCurrentClippingPath().clone();
+            //clip.intersect(new Area(transformedBox));
+            //Rectangle2D clipRect = clip.getBounds2D();
 
-            // apply the underlying Graphics2D device's DPI transform
-            Shape deviceClip = xform.createTransformedShape(clip);
+            // fixme: we render *the entire page* due to bug in above code / bbox
+            Rectangle2D clip = new Rectangle2D.Float(0, 0, pageSize.getWidth(), pageSize.getHeight());
+
+            // apply the underlying Graphics2D device's DPI transform and y-axis flip
+            Shape deviceClip = xformFlipped.createTransformedShape(clip);
             Rectangle2D bounds = deviceClip.getBounds2D();
+            deviceBounds = bounds;
 
-            minX = (int) Math.floor(bounds.getMinX());
-            minY = (int) Math.floor(bounds.getMinY());
-            int maxX = (int) Math.floor(bounds.getMaxX()) + 1;
-            int maxY = (int) Math.floor(bounds.getMaxY()) + 1;
+            int minX = (int)Math.floor(bounds.getMinX());
+            int minY = (int)Math.floor(bounds.getMinY());
+            int maxX = (int)Math.ceil(bounds.getMaxX());
+            int maxY = (int)Math.ceil(bounds.getMaxY());
 
-            width = maxX - minX;
-            height = maxY - minY;
+            int width = maxX - minX;
+            int height = maxY - minY;
 
-            image = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB); // FIXME - color space
+            image = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
             Graphics2D g = image.createGraphics();
 
             // flip y-axis
-            g.translate(0, height);
+            //g.translate(0, height);
+            g.translate(0, bounds.getHeight());
             g.scale(1, -1);
 
             // apply device transform (DPI)
             g.transform(xform);
 
             // adjust the origin
-            g.translate(-clipRect.getX(), -clipRect.getY());
+            //g.translate(-clipRect.getX(), -clipRect.getY());
+            //g.translate(-minX, -minY);
+            g.translate(-bounds.getX(), -bounds.getY());
 
             graphics = g;
             try
             {
                 if (isSoftMask)
                 {
-                    processSoftMask(form);
+                    processSoftMask(group);
                 }
                 else
                 {
-                    processTransparencyGroup(form);
+                    processTransparencyGroup(group);
                 }
             }
             finally 
@@ -964,24 +952,13 @@ public class PageDrawer extends PDFGraphicsStreamEngine
             return image;
         }
 
-        public PDRectangle getBBox()
+        /**
+         * Returns the bounds of the transparency group in the underlying Graphics2D device space.
+         */
+        public Rectangle2D getBounds()
         {
-            return bbox;
+            return deviceBounds;
         }
 
-        public Raster getAlphaRaster()
-        {
-            return image.getAlphaRaster();
-        }
-
-        public Raster getLuminosityRaster()
-        {
-            BufferedImage gray = new BufferedImage(width, height, BufferedImage.TYPE_BYTE_GRAY);
-            Graphics g = gray.getGraphics();
-            g.drawImage(image, 0, 0, null);
-            g.dispose();
-
-            return gray.getRaster();
-        }
     }
 }
