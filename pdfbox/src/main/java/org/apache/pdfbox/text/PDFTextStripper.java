@@ -501,21 +501,11 @@ public class PDFTextStripper extends PDFTextStreamEngine
             // these examples.
 
             // Keeps track of the previous average character width
-            float previousAveCharWidth = -1;
             while (textIter.hasNext())
             {
                 TextPosition position = textIter.next();
                 PositionWrapper current = new PositionWrapper(position);
                 String characterValue = position.getUnicode();
-
-                // Resets the average character width when we see a change in font
-                // or a change in the font size
-                if (lastPosition != null && (position.getFont() != lastPosition.getTextPosition()
-                        .getFont()
-                        || position.getFontSize() != lastPosition.getTextPosition().getFontSize()))
-                {
-                    previousAveCharWidth = -1;
-                }
 
                 float positionX;
                 float positionY;
@@ -539,9 +529,6 @@ public class PDFTextStripper extends PDFTextStreamEngine
                     positionHeight = position.getHeight();
                 }
 
-                // The current amount of characters in a word
-                int wordCharCount = position.getIndividualWidths().length;
-
                 // Estimate the expected width of the space based on the
                 // space character with some margin.
                 float wordSpacing = position.getWidthOfSpace();
@@ -562,34 +549,12 @@ public class PDFTextStripper extends PDFTextStreamEngine
                     }
                 }
 
-                // Estimate the expected width of the space based on the average character width
-                // with some margin. This calculation does not make a true average (average of
-                // averages) but we found that it gave the best results after numerous experiments.
-                // Based on experiments we also found that .3 worked well.
-                float averageCharWidth;
-                if (previousAveCharWidth < 0)
-                {
-                    averageCharWidth = positionWidth / wordCharCount;
-                }
-                else
-                {
-                    averageCharWidth = (previousAveCharWidth + positionWidth / wordCharCount) / 2f;
-                }
-                float deltaCharWidth = averageCharWidth * getAverageCharTolerance();
-
                 // Compares the values obtained by the average method and the wordSpacing method
                 // and picks the smaller number.
                 float expectedStartOfNextWordX = EXPECTED_START_OF_NEXT_WORD_X_RESET_VALUE;
                 if (endOfLastTextX != END_OF_LAST_TEXT_X_RESET_VALUE)
                 {
-                    if (deltaCharWidth > deltaSpace)
-                    {
-                        expectedStartOfNextWordX = endOfLastTextX + deltaSpace;
-                    }
-                    else
-                    {
-                        expectedStartOfNextWordX = endOfLastTextX + deltaCharWidth;
-                    }
+                    expectedStartOfNextWordX = endOfLastTextX + deltaSpace;
                 }
 
                 if (lastPosition != null)
@@ -658,7 +623,6 @@ public class PDFTextStripper extends PDFTextStreamEngine
                     startOfPage = false;
                 }
                 lastWordSpacing = wordSpacing;
-                previousAveCharWidth = averageCharWidth;
             }
             // print the final line
             if (line.size() > 0)

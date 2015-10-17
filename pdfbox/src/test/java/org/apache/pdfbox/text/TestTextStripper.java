@@ -25,6 +25,7 @@ import java.io.InputStreamReader;
 import java.io.LineNumberReader;
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
+import java.io.StringWriter;
 import java.io.Writer;
 import java.util.Iterator;
 
@@ -517,6 +518,18 @@ public class TestTextStripper extends TestCase
             {
                 fail("One or more failures, see test log for details");
             }
+    }
+
+    /**
+     * Regression test for https://issues.apache.org/jira/browse/PDFBOX-3019
+     */
+    public void testExtraction_spaceWidthDisplay() throws IOException {
+      PDDocument doc = PDDocument.load(TestTextStripper.class.getResourceAsStream("jbl-example-com.pdf"));
+      StringWriter writer = new StringWriter();
+      stripper.writeText(doc, writer);
+      String output = writer.toString();
+      doc.close();
+      assertTrue("Expected \"jbl@example.com\" in text " + output, output.contains("jbl@example.com"));
     }
 
     /**
