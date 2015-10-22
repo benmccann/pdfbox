@@ -162,7 +162,7 @@ public class PDFTextStripper extends PDFTextStreamEngine
     private float dropThreshold = defaultDropThreshold;
 
     // we will need to estimate where to add spaces, these are used to help guess
-    private float spacingTolerance = .5f;
+    private float spacingTolerance = .4f;
     private float averageCharTolerance = .3f;
 
     private List<PDThreadBead> pageArticles = null;
